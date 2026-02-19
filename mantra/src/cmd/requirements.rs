@@ -1,9 +1,9 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::db::{MantraDb, RequirementChanges};
+use crate::db::MantraDb;
 
-use mantra_schema::requirements::RequirementSchema;
+use mantra_schema::requirements::{Requirement, RequirementSchema};
 
 mod collect_common;
 mod collect_generic;
@@ -70,87 +70,102 @@ pub enum RequirementsError {
     Deserialize(serde_json::Error),
     #[error("{}", .0)]
     DbError(crate::db::DbError),
-    #[error("Invalid req_spec definitions found in source files:\n{}", .0.join("\n"))]
+    #[error("Invalid requirement definitions found:\n{}", .0.join("\n"))]
     InvalidReqSpecs(Vec<String>),
 }
 
+/// Parses all formats first, then inserts into DB in one batch.
+///
+/// This avoids ordering dependencies between formats (e.g., typst-defined
+/// parents needed by source-defined children) and surfaces parsing errors
+/// immediately without waiting for DB operations.
 pub async fn collect(db: &MantraDb, formats: &[Format]) -> Result<(), RequirementsError> {
-    let mut seen_ids: HashSet<String> = HashSet::new();
+    let mut all_reqs: Vec<Requirement> = Vec::new();
 
     for fmt in formats {
-        let req_changes = match fmt {
-            Format::FromWiki(wiki_cfg) => {
-                collect_markdown::collect_from_markdown(
-                    db,
-                    &wiki_cfg.root,
-                    &wiki_cfg.origin,
-                    wiki_cfg.major_version,
-                )
-                .await
-            }
+        let reqs = match fmt {
+            Format::FromWiki(wiki_cfg) => collect_markdown::parse_markdown(
+                &wiki_cfg.root,
+                &wiki_cfg.origin,
+                wiki_cfg.major_version,
+            )?,
             Format::FromSchema { files } => {
-                let mut changes = RequirementChanges::default();
-
+                let mut reqs = Vec::new();
                 for file in files {
                     let content = tokio::fs::read_to_string(file).await.map_err(|_| {
                         RequirementsError::CouldNotAccessFile(file.display().to_string())
                     })?;
-                    let schema =
+                    let schema: RequirementSchema =
                         serde_json::from_str(&content).map_err(RequirementsError::Deserialize)?;
-                    changes.merge(&mut collect_from_schema(db, schema).await?);
+                    reqs.extend(schema.requirements);
                 }
-
-                Ok(changes)
+                reqs
             }
             Format::FromSource(source_cfg) => {
-                collect_source::collect_from_source(
-                    db,
-                    &source_cfg.source_root,
-                    &source_cfg.macro_name,
-                )
-                .await
+                collect_source::parse_source(&source_cfg.source_root, &source_cfg.macro_name)?
             }
             Format::FromTypst(typst_cfg) => {
-                collect_typst::collect_from_typst(db, &typst_cfg.typst_root).await
+                collect_typst::parse_typst(&typst_cfg.typst_root)?
             }
             Format::FromGeneric {
                 file_globs,
                 regex,
                 ignore_verbatim,
-            } => {
-                collect_generic::collect_generic(db, file_globs, regex, None, ignore_verbatim).await
-            }
-        }?;
+            } => collect_generic::parse_generic(file_globs, regex, None, ignore_verbatim)?,
+        };
 
-        for update in &req_changes.updated {
-            if seen_ids.contains(&update.new.id) {
-                log::warn!(
-                    "Requirement '{}' collected by multiple sources (origin '{}' overwrites '{}')",
-                    update.new.id,
-                    update.new.origin,
-                    update.old.origin
-                );
-            }
+        let format_label = format_label(fmt);
+        if reqs.is_empty() {
+            log::warn!("No requirements found for {format_label}.");
+        } else {
+            println!("{}: parsed {} requirements.", format_label, reqs.len());
         }
 
-        for req in &req_changes.inserted {
-            seen_ids.insert(req.id.clone());
-        }
-        for update in &req_changes.updated {
-            seen_ids.insert(update.new.id.clone());
-        }
-
-        println!("{req_changes}");
+        all_reqs.extend(reqs);
     }
+
+    warn_duplicate_ids(&all_reqs);
+
+    if all_reqs.is_empty() {
+        println!("No requirements found across all sources.");
+        return Ok(());
+    }
+
+    let changes = db
+        .add_reqs(all_reqs)
+        .await
+        .map_err(RequirementsError::DbError)?;
+    println!("{changes}");
 
     Ok(())
 }
 
-pub async fn collect_from_schema(
-    db: &MantraDb,
-    schema: RequirementSchema,
-) -> Result<RequirementChanges, RequirementsError> {
-    db.add_reqs(schema.requirements)
-        .await
-        .map_err(RequirementsError::DbError)
+fn warn_duplicate_ids(reqs: &[Requirement]) {
+    let mut seen: HashMap<&str, &str> = HashMap::new();
+    for req in reqs {
+        if let Some(prev_origin) = seen.get(req.id.as_str()) {
+            if *prev_origin != req.origin {
+                log::warn!(
+                    "Requirement '{}' collected by multiple sources ('{}' and '{}')",
+                    req.id,
+                    prev_origin,
+                    req.origin
+                );
+            }
+        } else {
+            seen.insert(&req.id, &req.origin);
+        }
+    }
+}
+
+fn format_label(fmt: &Format) -> String {
+    match fmt {
+        Format::FromWiki(cfg) => format!("wiki({})", cfg.root.display()),
+        Format::FromSchema { files } => format!("schema({} files)", files.len()),
+        Format::FromSource(cfg) => format!("source({})", cfg.source_root.display()),
+        Format::FromTypst(cfg) => format!("typst({})", cfg.typst_root.display()),
+        Format::FromGeneric { file_globs, .. } => {
+            format!("generic({} globs)", file_globs.len())
+        }
+    }
 }

@@ -1,7 +1,5 @@
 use std::path::Path;
 
-use crate::db::{MantraDb, RequirementChanges};
-
 use ignore::{types::TypesBuilder, WalkBuilder};
 use mantra_schema::requirements::Requirement;
 use regex::Regex;
@@ -18,13 +16,12 @@ pub struct CollectorConfig<'a> {
     pub track_verbatim: bool,
 }
 
-pub async fn collect_from_source<'a>(
-    db: &MantraDb,
+pub fn parse_from_source(
     root: &Path,
     origin: &str,
     version: Option<usize>,
-    config: CollectorConfig<'a>,
-) -> Result<RequirementChanges, RequirementsError> {
+    config: &CollectorConfig,
+) -> Result<Vec<Requirement>, RequirementsError> {
     let mut reqs = Vec::new();
 
     if root.is_dir() {
@@ -67,7 +64,7 @@ pub async fn collect_from_source<'a>(
                     &content,
                     &req_origin,
                     version,
-                    &config,
+                    config,
                 ));
             }
         }
@@ -75,20 +72,10 @@ pub async fn collect_from_source<'a>(
         let content = std::fs::read_to_string(root)
             .map_err(|_| RequirementsError::CouldNotAccessFile(root.display().to_string()))?;
 
-        reqs = requirements_from_content(&content, origin, version, &config);
+        reqs = requirements_from_content(&content, origin, version, config);
     }
 
-    if reqs.is_empty() {
-        log::warn!("No requirements were found.");
-
-        let changes = RequirementChanges {
-            new_generation: db.max_req_generation().await,
-            ..Default::default()
-        };
-        Ok(changes)
-    } else {
-        db.add_reqs(reqs).await.map_err(RequirementsError::DbError)
-    }
+    Ok(reqs)
 }
 
 pub fn requirements_from_content(

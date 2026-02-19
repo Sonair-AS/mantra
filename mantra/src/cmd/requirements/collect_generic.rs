@@ -1,21 +1,19 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use crate::cmd::requirements::collect_common::requirements_from_content;
-use crate::db::{MantraDb, RequirementChanges};
 use glob::glob;
+use mantra_schema::requirements::Requirement;
 use regex::Regex;
 
-use super::collect_common::CollectorConfig;
+use super::collect_common::{requirements_from_content, CollectorConfig};
 use super::RequirementsError;
 
-pub async fn collect_generic(
-    db: &MantraDb,
+pub fn parse_generic(
     file_globs: &Vec<String>,
     regex: &String,
     version: Option<usize>,
     ignore_verbatim: &Option<bool>,
-) -> Result<RequirementChanges, RequirementsError> {
+) -> Result<Vec<Requirement>, RequirementsError> {
     let regex = &Regex::new(regex).expect("Could not create generic regex pattern.");
 
     let config = CollectorConfig {
@@ -40,7 +38,7 @@ pub async fn collect_generic(
         ));
     }
 
-    db.add_reqs(reqs).await.map_err(RequirementsError::DbError)
+    Ok(reqs)
 }
 
 pub fn get_files_from_glob_list(glob_list: &Vec<String>) -> Vec<PathBuf> {

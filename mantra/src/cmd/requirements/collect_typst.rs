@@ -3,7 +3,6 @@ use std::path::Path;
 use mantra_schema::requirements::Requirement;
 
 use super::RequirementsError;
-use crate::db::{MantraDb, RequirementChanges};
 use ignore::{types::TypesBuilder, WalkBuilder};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,10 +51,9 @@ impl std::fmt::Display for TypstReqErrorKind {
     }
 }
 
-pub async fn collect_from_typst(
-    db: &MantraDb,
+pub fn parse_typst(
     root: &Path,
-) -> Result<RequirementChanges, RequirementsError> {
+) -> Result<Vec<Requirement>, RequirementsError> {
     let mut all_reqs = Vec::new();
     let mut all_errors = Vec::new();
 
@@ -122,18 +120,7 @@ pub async fn collect_from_typst(
         return Err(RequirementsError::InvalidReqSpecs(all_errors));
     }
 
-    if all_reqs.is_empty() {
-        log::warn!("No requirements were found in typst files.");
-        let changes = RequirementChanges {
-            new_generation: db.max_req_generation().await,
-            ..Default::default()
-        };
-        Ok(changes)
-    } else {
-        db.add_reqs(all_reqs)
-            .await
-            .map_err(RequirementsError::DbError)
-    }
+    Ok(all_reqs)
 }
 
 fn extract_reqs_from_typst(

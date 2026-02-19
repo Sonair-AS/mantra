@@ -1,21 +1,20 @@
 use std::path::Path;
 
-use crate::db::{MantraDb, RequirementChanges};
+use mantra_schema::requirements::Requirement;
 use regex::Regex;
 
-use super::collect_common::{collect_from_source, CollectorConfig};
+use super::collect_common::{parse_from_source, CollectorConfig};
 use super::RequirementsError;
 
 const MARKDOWN_REGEX_PATTERN: &str = r"^(?:#{1,6}|\||\*).*?`(?<id>[^\s:]+)`(?:\((?:v(?<version>\d{1,7}):)?(?<marker>[^\)]+)\))?:\s+(?<title>.*?)(?:\s*\||$)";
 
 static MARKDOWN_REGEX: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
 
-pub async fn collect_from_markdown(
-    db: &MantraDb,
+pub fn parse_markdown(
     root: &Path,
     origin: &str,
     version: Option<usize>,
-) -> Result<RequirementChanges, RequirementsError> {
+) -> Result<Vec<Requirement>, RequirementsError> {
     let regex = MARKDOWN_REGEX.get_or_init(|| {
         Regex::new(MARKDOWN_REGEX_PATTERN).expect("Could not create markdown regex pattern.")
     });
@@ -26,7 +25,7 @@ pub async fn collect_from_markdown(
         track_verbatim: true,
     };
 
-    collect_from_source(db, root, origin, version, config).await
+    parse_from_source(root, origin, version, &config)
 }
 
 #[cfg(test)]

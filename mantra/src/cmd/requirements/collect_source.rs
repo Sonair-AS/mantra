@@ -3,14 +3,12 @@ use std::path::Path;
 use mantra_schema::requirements::Requirement;
 
 use super::RequirementsError;
-use crate::db::{MantraDb, RequirementChanges};
 use ignore::{types::TypesBuilder, WalkBuilder};
 
-pub async fn collect_from_source(
-    db: &MantraDb,
+pub fn parse_source(
     root: &Path,
     macro_name: &str,
-) -> Result<RequirementChanges, RequirementsError> {
+) -> Result<Vec<Requirement>, RequirementsError> {
     let mut all_reqs = Vec::new();
     let mut all_errors = Vec::new();
 
@@ -81,18 +79,7 @@ pub async fn collect_from_source(
         return Err(RequirementsError::InvalidReqSpecs(all_errors));
     }
 
-    if all_reqs.is_empty() {
-        log::warn!("No requirement specifications were found in source.");
-        let changes = RequirementChanges {
-            new_generation: db.max_req_generation().await,
-            ..Default::default()
-        };
-        Ok(changes)
-    } else {
-        db.add_reqs(all_reqs)
-            .await
-            .map_err(RequirementsError::DbError)
-    }
+    Ok(all_reqs)
 }
 
 fn collect_req_specs_from_rust_source(
