@@ -9,6 +9,7 @@ mod collect_common;
 mod collect_generic;
 mod collect_markdown;
 mod collect_source;
+mod collect_typst;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(untagged)]
@@ -23,6 +24,7 @@ pub enum Format {
         files: Vec<PathBuf>,
     },
     FromSource(SourceReqConfig),
+    FromTypst(TypstReqConfig),
     FromGeneric {
         #[serde(rename = "file-globs")]
         file_globs: Vec<String>,
@@ -42,6 +44,12 @@ pub struct SourceReqConfig {
 
 fn default_macro_name() -> String {
     "req_spec".to_string()
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TypstReqConfig {
+    #[serde(alias = "typst-root")]
+    pub typst_root: PathBuf,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -101,6 +109,9 @@ pub async fn collect(db: &MantraDb, formats: &[Format]) -> Result<(), Requiremen
                     &source_cfg.macro_name,
                 )
                 .await
+            }
+            Format::FromTypst(typst_cfg) => {
+                collect_typst::collect_from_typst(db, &typst_cfg.typst_root).await
             }
             Format::FromGeneric {
                 file_globs,

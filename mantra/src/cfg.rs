@@ -143,6 +143,27 @@ mod test {
     }
 
     #[test]
+    fn typst_root_requirements_syntax() {
+        let content = r#"
+            [[requirements]]
+            typst-root = "test_specs/sw_test_specs"
+        "#;
+
+        let file: crate::cfg::MantraConfigFile = toml::from_str(content).unwrap();
+
+        assert_eq!(file.requirements.len(), 1);
+        match &file.requirements[0] {
+            crate::cmd::requirements::Format::FromTypst(cfg) => {
+                assert_eq!(
+                    cfg.typst_root,
+                    PathBuf::from("test_specs/sw_test_specs")
+                );
+            }
+            other => panic!("Expected FromTypst, got: {:?}", other),
+        }
+    }
+
+    #[test]
     fn collect_file_syntax() {
         let content = r#"
                             [project]
