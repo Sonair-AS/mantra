@@ -231,6 +231,15 @@ impl MantraDb {
             .await
             .map_err(|err| DbError::Connect(err.to_string()))?;
 
+        sqlx::query("PRAGMA journal_mode = WAL")
+            .execute(&pool)
+            .await
+            .map_err(|err| DbError::Connect(err.to_string()))?;
+        sqlx::query("PRAGMA synchronous = NORMAL")
+            .execute(&pool)
+            .await
+            .map_err(|err| DbError::Connect(err.to_string()))?;
+
         MIGRATOR
             .run(&pool)
             .await
@@ -245,12 +254,18 @@ impl MantraDb {
         let new_generation = old_generation + 1;
         changes.new_generation = new_generation;
 
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|err| DbError::Insert(format!("Failed to begin transaction: {err}")))?;
+
         for req in &reqs {
             if let Ok(existing_record) = sqlx::query!(
                 "select id, title, origin, data, manual, deprecated from Requirements where id = $1",
                 req.id
             )
-            .fetch_one(&self.pool)
+            .fetch_one(&mut *tx)
             .await
             {
                 let existing_req = Requirement {
@@ -283,7 +298,7 @@ impl MantraDb {
                     req.manual,
                     req.deprecated,
                 )
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await;
             } else {
                 let res = sqlx::query!(
@@ -296,7 +311,7 @@ impl MantraDb {
                     req.manual,
                     req.deprecated,
                 )
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await;
 
                 if let Err(err) = res {
@@ -315,14 +330,14 @@ impl MantraDb {
             if let Some((parent, _)) = req.id.rsplit_once('.') {
                 let parent_exists =
                     sqlx::query!("select id from requirements where id = $1", parent)
-                        .fetch_one(&self.pool)
+                        .fetch_one(&mut *tx)
                         .await
                         .is_ok();
 
                 let existing_parent = if parent_exists {
                     parent.to_string()
                 } else {
-                    self.get_req_parent(parent)
+                    Self::get_req_parent_tx(&mut tx, parent)
                         .await
                         .ok_or(DbError::Insert(format!(
                             "Parent is missing for child='{}'.",
@@ -335,7 +350,7 @@ impl MantraDb {
                     existing_parent,
                     req.id,
                 )
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await;
 
                 if let Err(err) = res {
@@ -351,7 +366,7 @@ impl MantraDb {
                         parent,
                         req.id,
                     )
-                    .execute(&self.pool)
+                    .execute(&mut *tx)
                     .await;
     
                     if let Err(err) = res {
@@ -363,6 +378,10 @@ impl MantraDb {
                 }
             }
         }
+
+        tx.commit()
+            .await
+            .map_err(|err| DbError::Insert(format!("Failed to commit transaction: {err}")))?;
 
         Ok(changes)
     }
@@ -422,10 +441,13 @@ impl MantraDb {
             .await;
     }
 
-    async fn get_req_parent(&self, mut id: &str) -> Option<String> {
+    async fn get_req_parent_tx(
+        tx: &mut sqlx::Transaction<'_, DB>,
+        mut id: &str,
+    ) -> Option<String> {
         while let Some((parent, _)) = id.rsplit_once('.') {
             let parent_exists = sqlx::query!("select id from requirements where id = $1", parent)
-                .fetch_one(&self.pool)
+                .fetch_one(&mut **tx)
                 .await
                 .is_ok();
 
@@ -453,13 +475,19 @@ impl MantraDb {
         let file = SlashPathBuf::from(filepath);
         let file_str = file.to_string();
 
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|err| DbError::Insert(format!("Failed to begin transaction: {err}")))?;
+
         for trace in traces {
             let line = trace.line;
             let line_span = trace.line_span;
 
             for id in &trace.ids {
-                if (sqlx::query!("select req_id, filepath, line from Traces where req_id = $1 and filepath = $2 and line = $3", id, file_str, line).fetch_one(&self.pool).await).is_ok() {
-                    let _ = sqlx::query!("update Traces set generation = $4 where req_id = $1 and filepath = $2 and line = $3", id, file_str, line, new_generation).execute(&self.pool).await;
+                if (sqlx::query!("select req_id, filepath, line from Traces where req_id = $1 and filepath = $2 and line = $3", id, file_str, line).fetch_one(&mut *tx).await).is_ok() {
+                    let _ = sqlx::query!("update Traces set generation = $4 where req_id = $1 and filepath = $2 and line = $3", id, file_str, line, new_generation).execute(&mut *tx).await;
                     changes.unchanged_cnt += 1;
 
                     if let Some(span) = line_span {
@@ -472,7 +500,7 @@ impl MantraDb {
                             line,
                             start,
                             end,
-                        ).execute(&self.pool).await;
+                        ).execute(&mut *tx).await;
                     }
                 } else {
                     let res = sqlx::query!(
@@ -482,7 +510,7 @@ impl MantraDb {
                         line,
                         new_generation,
                     )
-                    .execute(&self.pool)
+                    .execute(&mut *tx)
                     .await;
 
                     if let Err(sqlx::Error::Database(err)) = res {
@@ -496,7 +524,7 @@ impl MantraDb {
                                     file_str,
                                     line,
                                 )
-                                .execute(&self.pool)
+                                .execute(&mut *tx)
                                 .await;
 
                             if let Err(err) = res {
@@ -520,7 +548,7 @@ impl MantraDb {
                                 line,
                                 start,
                                 end,
-                            ).execute(&self.pool).await;
+                            ).execute(&mut *tx).await;
                         }
                     }
                 }
@@ -532,11 +560,15 @@ impl MantraDb {
                         item_name,
                         file_str,
                         span.start,
-                    ).execute(&self.pool).await;
+                    ).execute(&mut *tx).await;
                 }
             }
             
         }
+
+        tx.commit()
+            .await
+            .map_err(|err| DbError::Insert(format!("Failed to commit transaction: {err}")))?;
 
         Ok(changes)
     }
