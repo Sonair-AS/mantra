@@ -4,6 +4,12 @@ use mantra_lang_tracing::{
     RawTraceEntry,
 };
 
+mod req_spec;
+pub use req_spec::{
+    collect_req_spec_from_node, find_matching_paren, parse_quoted_args, ReqSpec, ReqSpecError,
+    ReqSpecErrorKind, ReqSpecResult,
+};
+
 pub fn collect_traces_in_rust(
     node: &AstNode,
     src: &[u8],

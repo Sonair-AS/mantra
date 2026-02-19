@@ -113,6 +113,36 @@ mod test {
     use std::path::PathBuf;
 
     #[test]
+    fn source_root_requirements_syntax() {
+        let content = r#"
+            [[requirements]]
+            source-root = "firmware"
+
+            [[requirements]]
+            source-root = "../common"
+            macro-name = "my_req"
+        "#;
+
+        let file: crate::cfg::MantraConfigFile = toml::from_str(content).unwrap();
+
+        assert_eq!(file.requirements.len(), 2);
+        match &file.requirements[0] {
+            crate::cmd::requirements::Format::FromSource(cfg) => {
+                assert_eq!(cfg.source_root, PathBuf::from("firmware"));
+                assert_eq!(cfg.macro_name, "req_spec");
+            }
+            other => panic!("Expected FromSource, got: {:?}", other),
+        }
+        match &file.requirements[1] {
+            crate::cmd::requirements::Format::FromSource(cfg) => {
+                assert_eq!(cfg.source_root, PathBuf::from("../common"));
+                assert_eq!(cfg.macro_name, "my_req");
+            }
+            other => panic!("Expected FromSource, got: {:?}", other),
+        }
+    }
+
+    #[test]
     fn collect_file_syntax() {
         let content = r#"
                             [project]

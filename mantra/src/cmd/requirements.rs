@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::db::{MantraDb, RequirementChanges};
@@ -7,6 +8,7 @@ use mantra_schema::requirements::RequirementSchema;
 mod collect_common;
 mod collect_generic;
 mod collect_markdown;
+mod collect_source;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(untagged)]
@@ -20,6 +22,7 @@ pub enum Format {
         )]
         files: Vec<PathBuf>,
     },
+    FromSource(SourceReqConfig),
     FromGeneric {
         #[serde(rename = "file-globs")]
         file_globs: Vec<String>,
@@ -27,6 +30,18 @@ pub enum Format {
         #[serde(rename = "ignore-verbatim")]
         ignore_verbatim: Option<bool>,
     },
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SourceReqConfig {
+    #[serde(alias = "source-root")]
+    pub source_root: PathBuf,
+    #[serde(alias = "macro-name", default = "default_macro_name")]
+    pub macro_name: String,
+}
+
+fn default_macro_name() -> String {
+    "req_spec".to_string()
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -47,9 +62,13 @@ pub enum RequirementsError {
     Deserialize(serde_json::Error),
     #[error("{}", .0)]
     DbError(crate::db::DbError),
+    #[error("Invalid req_spec definitions found in source files:\n{}", .0.join("\n"))]
+    InvalidReqSpecs(Vec<String>),
 }
 
 pub async fn collect(db: &MantraDb, formats: &[Format]) -> Result<(), RequirementsError> {
+    let mut seen_ids: HashSet<String> = HashSet::new();
+
     for fmt in formats {
         let req_changes = match fmt {
             Format::FromWiki(wiki_cfg) => {
@@ -75,6 +94,14 @@ pub async fn collect(db: &MantraDb, formats: &[Format]) -> Result<(), Requiremen
 
                 Ok(changes)
             }
+            Format::FromSource(source_cfg) => {
+                collect_source::collect_from_source(
+                    db,
+                    &source_cfg.source_root,
+                    &source_cfg.macro_name,
+                )
+                .await
+            }
             Format::FromGeneric {
                 file_globs,
                 regex,
@@ -83,6 +110,25 @@ pub async fn collect(db: &MantraDb, formats: &[Format]) -> Result<(), Requiremen
                 collect_generic::collect_generic(db, file_globs, regex, None, ignore_verbatim).await
             }
         }?;
+
+        for update in &req_changes.updated {
+            if seen_ids.contains(&update.new.id) {
+                log::warn!(
+                    "Requirement '{}' collected by multiple sources (origin '{}' overwrites '{}')",
+                    update.new.id,
+                    update.new.origin,
+                    update.old.origin
+                );
+            }
+        }
+
+        for req in &req_changes.inserted {
+            seen_ids.insert(req.id.clone());
+        }
+        for update in &req_changes.updated {
+            seen_ids.insert(update.new.id.clone());
+        }
+
         println!("{req_changes}");
     }
 

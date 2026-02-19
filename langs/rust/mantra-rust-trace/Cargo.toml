@@ -10,3 +10,8 @@ license.workspace = true
 
 [dependencies]
 mantra-lang-tracing = { path = "../../mantra-lang-tracing", version = "0" }
+proc-macro2 = { workspace = true }
+
+[dev-dependencies]
+tree-sitter = { workspace = true }
+tree-sitter-rust = { workspace = true }
