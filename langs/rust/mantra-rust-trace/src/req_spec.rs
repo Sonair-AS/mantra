@@ -44,6 +44,8 @@ pub enum ReqSpecErrorKind {
     EmptyArguments,
     /// Arguments inside `#<macro_name>(...)` could not be parsed as quoted strings.
     MalformedArguments,
+    /// `#<macro_name>("ID")` was called with only an ID and no title.
+    MissingTitle,
 }
 
 impl std::fmt::Display for ReqSpecError {
@@ -81,6 +83,12 @@ impl std::fmt::Display for ReqSpecErrorKind {
                 write!(
                     f,
                     "requirement macro has malformed arguments; expected quoted strings like #macro(\"ID\", \"title\")"
+                )
+            }
+            Self::MissingTitle => {
+                write!(
+                    f,
+                    "requirement macro is missing a title; expected at least #macro(\"ID\", \"title\")"
                 )
             }
         }
@@ -160,10 +168,10 @@ pub fn collect_req_spec_from_node(
                     });
                 } else {
                     match parse_req_spec_args(args_str, line) {
-                        Some(spec) => result.specs.push(spec),
-                        None => result.errors.push(ReqSpecError {
+                        Ok(spec) => result.specs.push(spec),
+                        Err(kind) => result.errors.push(ReqSpecError {
                             line,
-                            kind: ReqSpecErrorKind::MalformedArguments,
+                            kind,
                             context: text.to_string(),
                         }),
                     }
@@ -259,22 +267,24 @@ pub fn parse_quoted_args(args_str: &str) -> Option<Vec<String>> {
     Some(string_args)
 }
 
-fn parse_req_spec_args(args_str: &str, line: usize) -> Option<ReqSpec> {
-    let mut string_args = parse_quoted_args(args_str)?;
+fn parse_req_spec_args(args_str: &str, line: usize) -> Result<ReqSpec, ReqSpecErrorKind> {
+    let mut string_args =
+        parse_quoted_args(args_str).ok_or(ReqSpecErrorKind::MalformedArguments)?;
 
     let id = string_args.remove(0);
-    let title = if !string_args.is_empty() {
-        string_args.remove(0)
-    } else {
-        String::new()
-    };
+
+    if string_args.is_empty() {
+        return Err(ReqSpecErrorKind::MissingTitle);
+    }
+
+    let title = string_args.remove(0);
     let expected_reaction = if !string_args.is_empty() {
         Some(string_args.remove(0))
     } else {
         None
     };
 
-    Some(ReqSpec {
+    Ok(ReqSpec {
         id,
         title,
         expected_reaction,
@@ -388,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn test_should_extract_req_spec_with_only_id() {
+    fn test_should_error_on_req_spec_with_only_id() {
         let src = r#"
 #[cfg(test)]
 mod tests {
@@ -396,15 +406,9 @@ mod tests {
 }
 "#;
         let result = parse_all(src);
-        assert!(
-            !result.has_errors(),
-            "Unexpected errors: {:?}",
-            result.errors
-        );
-        assert_eq!(result.specs.len(), 1);
-        assert_eq!(result.specs[0].id, "MY.ID");
-        assert_eq!(result.specs[0].title, "");
-        assert_eq!(result.specs[0].expected_reaction, None);
+        assert!(result.specs.is_empty());
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].kind, ReqSpecErrorKind::MissingTitle);
     }
 
     #[test]
