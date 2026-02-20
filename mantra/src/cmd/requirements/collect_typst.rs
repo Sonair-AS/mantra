@@ -145,15 +145,8 @@ fn extract_reqs_from_typst(
                             context: line.trim().to_string(),
                         });
                     } else {
-                        match mantra_rust_trace::parse_quoted_args(args_str) {
-                            Some(mut args) if !args.is_empty() => {
-                                let id = args.remove(0);
-                                let title = if !args.is_empty() {
-                                    args.remove(0)
-                                } else {
-                                    String::new()
-                                };
-
+                        match parse_typst_req_args(args_str) {
+                            Some((id, title)) => {
                                 let parent = id
                                     .rsplit_once('.')
                                     .map(|(parent, _)| parent.to_string());
@@ -168,7 +161,7 @@ fn extract_reqs_from_typst(
                                     parents: parent.map(|p| vec![p]),
                                 });
                             }
-                            _ => {
+                            None => {
                                 errors.push(TypstReqError {
                                     line: line_number,
                                     kind: TypstReqErrorKind::MalformedArguments,
@@ -190,6 +183,102 @@ fn extract_reqs_from_typst(
     }
 
     (reqs, errors)
+}
+
+/// Parses arguments of a `req(...)` or `reqt(...)` call.
+///
+/// Supports two title formats:
+/// - Quoted string: `"ID", "title"` or `"ID", "title", error("Type")`
+/// - Typst content block: `"ID", [title with #link("url")[display]]`
+///
+/// The ID (first argument) must always be a quoted string.
+/// Any arguments beyond the second (e.g., `error("Type")`, `panic`) are ignored.
+/// Returns `(id, title)` on success.
+fn parse_typst_req_args(args_str: &str) -> Option<(String, String)> {
+    // Try all-quoted first (most common case, and handles 3+ quoted args)
+    if let Some(mut args) = mantra_rust_trace::parse_quoted_args(args_str) {
+        if !args.is_empty() {
+            let id = args.remove(0);
+            let title = if !args.is_empty() {
+                args.remove(0)
+            } else {
+                String::new()
+            };
+            return Some((id, title));
+        }
+    }
+
+    // Manual parsing for mixed formats (content blocks, or non-quoted third args
+    // like error("Type") and panic)
+    let trimmed = args_str.trim();
+    if !trimmed.starts_with('"') {
+        return None;
+    }
+
+    let id_end = trimmed[1..].find('"')? + 1;
+    let id = trimmed[1..id_end].to_string();
+    if id.is_empty() {
+        return None;
+    }
+
+    let rest = trimmed[id_end + 1..].trim();
+    if rest.is_empty() {
+        return Some((id, String::new()));
+    }
+
+    let rest = rest.strip_prefix(',')?.trim();
+    if rest.is_empty() {
+        return Some((id, String::new()));
+    }
+
+    if rest.starts_with('[') {
+        let title = extract_content_block(rest)?;
+        Some((id, title))
+    } else if rest.starts_with('"') {
+        let title_end = rest[1..].find('"')? + 1;
+        let title = rest[1..title_end].to_string();
+        Some((id, title))
+    } else {
+        None
+    }
+}
+
+/// Extracts the text inside a balanced Typst content block `[...]`.
+///
+/// Handles nested brackets and skips brackets inside quoted strings.
+fn extract_content_block(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    if bytes.first() != Some(&b'[') {
+        return None;
+    }
+
+    let mut depth: usize = 0;
+    let mut i = 0;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    if bytes[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            b'[' => depth += 1,
+            b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(s[1..i].to_string());
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    None
 }
 
 /// Finds `#req(`, `req(`, `#reqt(`, and `reqt(` calls in a line.
@@ -449,5 +538,92 @@ SetDeviceState:
         let (reqs, errors) = extract_reqs_from_typst(content, "test.typ");
         assert!(errors.is_empty());
         assert_eq!(reqs[0].title, " Leading space title");
+    }
+
+    // --- Content block tests ---
+
+    #[test]
+    fn test_should_extract_content_block_title() {
+        let content = r#"#req("A.B.INVALID", [Value outside limits])"#;
+        let (reqs, errors) = extract_reqs_from_typst(content, "test.typ");
+        assert!(errors.is_empty(), "Unexpected errors: {:?}", errors);
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0].id, "A.B.INVALID");
+        assert_eq!(reqs[0].title, "Value outside limits");
+    }
+
+    #[test]
+    fn test_should_extract_content_block_with_nested_brackets() {
+        let content = r#"#req("A.B.INVALID", [Description with #link("https://example.com/issue-42")[ISSUE-42]])"#;
+        let (reqs, errors) = extract_reqs_from_typst(content, "test.typ");
+        assert!(errors.is_empty(), "Unexpected errors: {:?}", errors);
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0].id, "A.B.INVALID");
+        assert_eq!(
+            reqs[0].title,
+            r#"Description with #link("https://example.com/issue-42")[ISSUE-42]"#
+        );
+    }
+
+    #[test]
+    fn test_should_handle_mixed_quoted_and_content_block() {
+        let content = r#"
+#req("A.B", "Top-level description")
+#req("A.B.VALID", "Normal case")
+#req("A.B.INVALID", [Error case. See #link("https://example.com")[details]])
+"#;
+        let (reqs, errors) = extract_reqs_from_typst(content, "test.typ");
+        assert!(errors.is_empty(), "Unexpected errors: {:?}", errors);
+        assert_eq!(reqs.len(), 3);
+        assert_eq!(reqs[0].title, "Top-level description");
+        assert_eq!(reqs[1].title, "Normal case");
+        assert_eq!(
+            reqs[2].title,
+            r#"Error case. See #link("https://example.com")[details]"#
+        );
+    }
+
+    #[test]
+    fn test_should_handle_error_as_third_arg() {
+        let content = r#"#req("A.B.S0", "Value below threshold", error("InvalidConfig"))"#;
+        let (reqs, errors) = extract_reqs_from_typst(content, "test.typ");
+        assert!(errors.is_empty(), "Unexpected errors: {:?}", errors);
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0].id, "A.B.S0");
+        assert_eq!(reqs[0].title, "Value below threshold");
+    }
+
+    #[test]
+    fn test_should_handle_panic_as_third_arg() {
+        let content = r#"#req("A.B.S1", "Corrupted state detected", panic)"#;
+        let (reqs, errors) = extract_reqs_from_typst(content, "test.typ");
+        assert!(errors.is_empty(), "Unexpected errors: {:?}", errors);
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0].id, "A.B.S1");
+        assert_eq!(reqs[0].title, "Corrupted state detected");
+    }
+
+    #[test]
+    fn test_should_handle_content_block_with_error_third_arg() {
+        let content = r#"#req("A.B.S2", [Value outside limits], error("OutOfRange"))"#;
+        let (reqs, errors) = extract_reqs_from_typst(content, "test.typ");
+        assert!(errors.is_empty(), "Unexpected errors: {:?}", errors);
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0].id, "A.B.S2");
+        assert_eq!(reqs[0].title, "Value outside limits");
+    }
+
+    #[test]
+    fn test_should_extract_content_block_helper() {
+        assert_eq!(
+            extract_content_block("[simple text]"),
+            Some("simple text".to_string())
+        );
+        assert_eq!(
+            extract_content_block("[nested [brackets] here]"),
+            Some("nested [brackets] here".to_string())
+        );
+        assert_eq!(extract_content_block("[unmatched"), None);
+        assert_eq!(extract_content_block("not a block"), None);
     }
 }
