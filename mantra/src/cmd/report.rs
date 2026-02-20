@@ -157,6 +157,93 @@ pub enum ReportFormat {
     Json,
 }
 
+/// Materializes expensive SQLite views as indexed temporary tables.
+///
+/// sqlite views are not materialized -- each query re-evaluates the full view
+/// definition including any recursive CTEs. During report generation, views like
+/// `RequirementDescendants` are queried once per requirement,
+/// causing O(N) evaluations of the same expensive computation.
+///
+/// By creating temp tables from these views up front (in dependency order),
+/// subsequent queries transparently hit the indexed temp tables instead of
+/// re-evaluating the views. This requires a single-connection pool so that
+/// the temp tables persist across queries.
+///
+/// This is a bit hacky and so will require more manual maintenance.
+/// The view list below must stay in sync with the schema in `migrations/`. If a view is renamed or
+/// removed, the corresponding entry here will cause a runtime error. New views are fine, but will
+/// not benefit from the speed up of materialized views.
+async fn materialize_views_for_report(db: &MantraDb) -> Result<(), ReportError> {
+    let pool = db.pool();
+
+    let statements: &[&str] = &[
+        // Phase 1: Base views (no view dependencies)
+        "CREATE TEMP TABLE RequirementDescendants AS SELECT * FROM RequirementDescendants",
+        "CREATE INDEX temp.idx_rd_id ON RequirementDescendants(id)",
+        "CREATE INDEX temp.idx_rd_desc ON RequirementDescendants(descendant_id)",
+        "CREATE TEMP TABLE LeafRequirements AS SELECT * FROM LeafRequirements",
+        "CREATE INDEX temp.idx_lr ON LeafRequirements(id)",
+        "CREATE TEMP TABLE DirectlyTracedRequirements AS SELECT * FROM DirectlyTracedRequirements",
+        "CREATE INDEX temp.idx_dtr ON DirectlyTracedRequirements(id)",
+        "CREATE TEMP TABLE DirectlyCoveredRequirements AS SELECT * FROM DirectlyCoveredRequirements",
+        "CREATE INDEX temp.idx_dcr ON DirectlyCoveredRequirements(id)",
+        "CREATE TEMP TABLE FailedTestCoverage AS SELECT * FROM FailedTestCoverage",
+        "CREATE INDEX temp.idx_ftc ON FailedTestCoverage(req_id)",
+        // Phase 2: Derived from phase 1
+        "CREATE TEMP TABLE NonLeafRequirements AS SELECT * FROM NonLeafRequirements",
+        "CREATE INDEX temp.idx_nlr ON NonLeafRequirements(id)",
+        "CREATE TEMP TABLE DeprecatedRequirements AS SELECT * FROM DeprecatedRequirements",
+        "CREATE INDEX temp.idx_dr ON DeprecatedRequirements(id)",
+        "CREATE TEMP TABLE ManualRequirements AS SELECT * FROM ManualRequirements",
+        "CREATE INDEX temp.idx_mr ON ManualRequirements(id)",
+        // Phase 3: Recursive intermediates
+        "CREATE TEMP TABLE UntracedRequirements AS SELECT * FROM UntracedRequirements",
+        "CREATE INDEX temp.idx_ur ON UntracedRequirements(id)",
+        "CREATE TEMP TABLE UncoveredRequirements AS SELECT * FROM UncoveredRequirements",
+        "CREATE INDEX temp.idx_ucr ON UncoveredRequirements(id)",
+        // Phase 4: Derived from phase 3
+        "CREATE TEMP TABLE IndirectlyTracedRequirements AS SELECT * FROM IndirectlyTracedRequirements",
+        "CREATE INDEX temp.idx_itr ON IndirectlyTracedRequirements(id)",
+        "CREATE TEMP TABLE IndirectlyCoveredRequirements AS SELECT * FROM IndirectlyCoveredRequirements",
+        "CREATE INDEX temp.idx_icr ON IndirectlyCoveredRequirements(id)",
+        "CREATE TEMP TABLE TracedRequirements AS SELECT * FROM TracedRequirements",
+        "CREATE INDEX temp.idx_tr ON TracedRequirements(id)",
+        "CREATE TEMP TABLE CoveredRequirements AS SELECT * FROM CoveredRequirements",
+        "CREATE INDEX temp.idx_cr ON CoveredRequirements(id)",
+        // Phase 5: Further derived
+        "CREATE TEMP TABLE FullyTracedRequirements AS SELECT * FROM FullyTracedRequirements",
+        "CREATE INDEX temp.idx_ftr ON FullyTracedRequirements(id)",
+        "CREATE TEMP TABLE FailedCoveredRequirements AS SELECT * FROM FailedCoveredRequirements",
+        "CREATE INDEX temp.idx_fcr ON FailedCoveredRequirements(id)",
+        "CREATE TEMP TABLE InvalidRequirements AS SELECT * FROM InvalidRequirements",
+        "CREATE INDEX temp.idx_ir ON InvalidRequirements(id)",
+        // Phase 6: Final derived views
+        "CREATE TEMP TABLE PassedCoveredRequirements AS SELECT * FROM PassedCoveredRequirements",
+        "CREATE INDEX temp.idx_pcr ON PassedCoveredRequirements(id)",
+        "CREATE TEMP TABLE FullyCoveredRequirements AS SELECT * FROM FullyCoveredRequirements",
+        "CREATE INDEX temp.idx_fcvr ON FullyCoveredRequirements(id)",
+        // Phase 7: Per-requirement query targets
+        "CREATE TEMP TABLE LeafChildOverview AS SELECT * FROM LeafChildOverview",
+        "CREATE INDEX temp.idx_lco ON LeafChildOverview(id)",
+        "CREATE TEMP TABLE IndirectTraceTree AS SELECT * FROM IndirectTraceTree",
+        "CREATE INDEX temp.idx_itt ON IndirectTraceTree(id)",
+        "CREATE TEMP TABLE DirectCoverageTree AS SELECT * FROM DirectCoverageTree",
+        "CREATE INDEX temp.idx_dct ON DirectCoverageTree(id)",
+        "CREATE TEMP TABLE IndirectTestCoverageTree AS SELECT * FROM IndirectTestCoverageTree",
+        "CREATE INDEX temp.idx_itct ON IndirectTestCoverageTree(id)",
+        "CREATE TEMP TABLE ManuallyVerifiedRequirements AS SELECT * FROM ManuallyVerifiedRequirements",
+    ];
+
+    for stmt in statements {
+        sqlx::query(stmt)
+            .execute(pool)
+            .await
+            .map_err(ReportError::Db)?;
+    }
+
+    Ok(())
+}
+
 pub async fn report(db: &MantraDb, cfg: ReportConfig) -> Result<(), ReportError> {
     let mut filepath = if cfg.path.extension().is_some() {
         cfg.path
@@ -283,6 +370,8 @@ impl ReportContext {
         req_template: Option<&Path>,
         test_run_template: Option<&Path>,
     ) -> Result<Self, ReportError> {
+        materialize_views_for_report(db).await?;
+
         let overview = RequirementsOverview::try_from(db).await?;
 
         let req_records = sqlx::query!("select id from Requirements order by id")

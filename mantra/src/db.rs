@@ -227,14 +227,12 @@ impl MantraDb {
             .url
             .clone()
             .unwrap_or("sqlite://mantra.db?mode=rwc".to_string());
-        let pool = Pool::<DB>::connect(&url)
+        let pool = sqlx::pool::PoolOptions::<DB>::new()
+            .max_connections(1)
+            .connect(&url)
             .await
             .map_err(|err| DbError::Connect(err.to_string()))?;
 
-        sqlx::query("PRAGMA journal_mode = WAL")
-            .execute(&pool)
-            .await
-            .map_err(|err| DbError::Connect(err.to_string()))?;
         sqlx::query("PRAGMA synchronous = NORMAL")
             .execute(&pool)
             .await
