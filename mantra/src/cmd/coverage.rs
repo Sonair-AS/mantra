@@ -149,8 +149,8 @@ pub async fn collect_from_str(db: &MantraDb, data: &str) -> Result<CoverageChang
                                 });
                             }
                             Ok(false) => {
-                                log::info!(
-                                "Found unrelated coverage for reg-id=`{}`, file='{}', line='{}'.",
+                                log::warn!(
+                                "Found unrelated coverage for req-id=`{}`, file='{}', line='{}'.",
                                 req_id,
                                 file.filepath.display(),
                                 trace.line
