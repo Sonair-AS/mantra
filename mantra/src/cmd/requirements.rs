@@ -79,7 +79,11 @@ pub enum RequirementsError {
 /// This avoids ordering dependencies between formats (e.g., typst-defined
 /// parents needed by source-defined children) and surfaces parsing errors
 /// immediately without waiting for DB operations.
-pub async fn collect(db: &MantraDb, formats: &[Format]) -> Result<(), RequirementsError> {
+pub async fn collect(
+    db: &MantraDb,
+    formats: &[Format],
+    verbose: bool,
+) -> Result<(), RequirementsError> {
     let mut all_reqs: Vec<Requirement> = Vec::new();
 
     for fmt in formats {
@@ -104,9 +108,7 @@ pub async fn collect(db: &MantraDb, formats: &[Format]) -> Result<(), Requiremen
             Format::FromSource(source_cfg) => {
                 collect_source::parse_source(&source_cfg.source_root, &source_cfg.macro_name)?
             }
-            Format::FromTypst(typst_cfg) => {
-                collect_typst::parse_typst(&typst_cfg.typst_root)?
-            }
+            Format::FromTypst(typst_cfg) => collect_typst::parse_typst(&typst_cfg.typst_root)?,
             Format::FromGeneric {
                 file_globs,
                 regex,
@@ -135,7 +137,8 @@ pub async fn collect(db: &MantraDb, formats: &[Format]) -> Result<(), Requiremen
         .add_reqs(all_reqs)
         .await
         .map_err(RequirementsError::DbError)?;
-    println!("{changes}");
+
+    changes.print_summary(verbose);
 
     Ok(())
 }

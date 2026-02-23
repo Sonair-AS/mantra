@@ -67,11 +67,11 @@ async fn collect(db: &db::MantraDb, cfg: MantraConfigPath) -> Result<(), MantraE
         ))
     })?;
 
-    cmd::requirements::collect(db, &collect_file.requirements)
+    cmd::requirements::collect(db, &collect_file.requirements, cfg.verbose)
         .await
         .map_err(MantraError::Extract)?;
 
-    cmd::trace::collect(db, &collect_file.traces)
+    cmd::trace::collect(db, &collect_file.traces, cfg.verbose)
         .await
         .map_err(MantraError::Trace)?;
 
@@ -81,7 +81,7 @@ async fn collect(db: &db::MantraDb, cfg: MantraConfigPath) -> Result<(), MantraE
                 .await
                 .map_err(MantraError::Coverage)?;
 
-            println!("{coverage_changes}");
+            coverage_changes.print_summary(cfg.verbose);
         }
     }
 
