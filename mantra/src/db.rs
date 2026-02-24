@@ -86,6 +86,23 @@ impl TraceChanges {
         self.inserted.append(&mut other.inserted);
         self.unchanged_cnt += other.unchanged_cnt;
     }
+
+    pub fn print_summary(&self, verbose: bool) {
+        if self.inserted.is_empty() {
+            if self.unchanged_cnt == 0 {
+                println!("No traces found.");
+            } else {
+                println!("'{}' traces kept.", self.unchanged_cnt);
+            }
+        } else {
+            println!("'{}' traces added:", self.inserted.len());
+            if verbose {
+                for trace in &self.inserted {
+                    println!("- `{}`", trace);
+                }
+            }
+        }
+    }
 }
 
 impl std::fmt::Display for TraceChanges {
@@ -159,6 +176,34 @@ impl RequirementChanges {
         self.inserted.append(&mut other.inserted);
         self.unchanged_cnt += other.unchanged_cnt;
         self.new_generation = self.new_generation.max(other.new_generation);
+    }
+
+    pub fn print_summary(&self, verbose: bool) {
+        if self.updated.is_empty() && self.inserted.is_empty() {
+            if self.unchanged_cnt == 0 {
+                println!("No requirements found.");
+            } else {
+                println!("'{}' requirements kept.", self.unchanged_cnt);
+            }
+        } else {
+            if !self.updated.is_empty() {
+                println!("'{}' requirements updated:", self.updated.len());
+                if verbose {
+                    for req in &self.updated {
+                        println!("- `{}`", req.new.id);
+                    }
+                }
+            }
+
+            if !self.inserted.is_empty() {
+                println!("'{}' requirements added:", self.inserted.len());
+                if verbose {
+                    for req in &self.inserted {
+                        println!("- `{}`", req.id);
+                    }
+                }
+            }
+        }
     }
 }
 

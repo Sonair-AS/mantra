@@ -17,6 +17,21 @@ pub struct CoverageChanges {
     inserted: Vec<TracePk>,
 }
 
+impl CoverageChanges {
+    pub fn print_summary(&self, verbose: bool) {
+        if self.inserted.is_empty() {
+            println!("No coverage information was added.")
+        } else {
+            println!("Coverage added for {} traces:", self.inserted.len());
+            if verbose {
+                for covered_trace in &self.inserted {
+                    println!("- {covered_trace}");
+                }
+            }
+        }
+    }
+}
+
 impl std::fmt::Display for CoverageChanges {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.inserted.is_empty() {

@@ -15,6 +15,9 @@ pub struct Config {
 pub struct MantraConfigPath {
     #[arg(default_value = "mantra.toml")]
     pub filepath: PathBuf,
+
+    #[arg(long, default_value = "false")]
+    pub verbose: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

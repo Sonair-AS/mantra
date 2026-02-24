@@ -36,6 +36,7 @@ async fn main() {
         db,
         cmd: mantra::cmd::Cmd::Collect(MantraConfigPath {
             filepath: mantra_file,
+            verbose: true,
         }),
     };
 

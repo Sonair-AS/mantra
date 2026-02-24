@@ -46,7 +46,7 @@ pub enum TraceError {
     Deserialize(serde_json::Error),
 }
 
-pub async fn collect(db: &MantraDb, kinds: &[TraceKind]) -> Result<(), TraceError> {
+pub async fn collect(db: &MantraDb, kinds: &[TraceKind], verbose: bool) -> Result<(), TraceError> {
     for kind in kinds {
         let trace_changes = match kind {
             TraceKind::FromSource(source_cfg) => trace_from_source(db, source_cfg).await,
@@ -60,7 +60,8 @@ pub async fn collect(db: &MantraDb, kinds: &[TraceKind]) -> Result<(), TraceErro
                 Ok(changes)
             }
         }?;
-        println!("{trace_changes}");
+
+        trace_changes.print_summary(verbose);
     }
 
     Ok(())
