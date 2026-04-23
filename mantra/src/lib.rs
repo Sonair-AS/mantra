@@ -8,6 +8,7 @@ use db::DbError;
 pub mod cfg;
 pub mod cmd;
 pub mod db;
+pub mod logger;
 
 #[derive(Debug, thiserror::Error)]
 pub enum MantraError {
