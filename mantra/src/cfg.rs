@@ -7,6 +7,9 @@ pub struct Config {
     #[command(flatten)]
     pub db: db::Config,
 
+    #[arg(long, default_value = "false", global = true)]
+    pub warnings_as_errors: bool,
+
     #[command(subcommand)]
     pub cmd: Cmd,
 }
