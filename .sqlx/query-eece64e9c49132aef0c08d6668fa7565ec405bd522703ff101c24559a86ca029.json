@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "select req_id, filepath, line, start, end from TraceSpans where filepath = $1",
+  "query": "select req_id, filepath, line, start, end from TraceSpans",
   "describe": {
     "columns": [
       {
@@ -30,7 +30,7 @@
       }
     ],
     "parameters": {
-      "Right": 1
+      "Right": 0
     },
     "nullable": [
       false,
@@ -40,5 +40,5 @@
       false
     ]
   },
-  "hash": "2b173faf7077e0add33d200be389fad8db8e333626d3c7f77a2c2aae994236c6"
+  "hash": "eece64e9c49132aef0c08d6668fa7565ec405bd522703ff101c24559a86ca029"
 }
