@@ -99,6 +99,8 @@ pub async fn collect_from_str(db: &MantraDb, data: &str) -> Result<CoverageChang
         inserted: Vec::new(),
     };
 
+    let trace_spans_by_filepath = db.fetch_all_trace_spans().await.map_err(CoverageError::Db)?;
+
     for test_run in coverage.test_runs {
         if db.test_run_exists(&test_run.name, &test_run.date).await {
             log::info!(
@@ -109,9 +111,21 @@ pub async fn collect_from_str(db: &MantraDb, data: &str) -> Result<CoverageChang
             continue;
         }
 
-        db.add_test_run(
-            &test_run.name,
-            &test_run.date,
+        let test_run_pk = TestRunPk {
+            name: test_run.name,
+            date: test_run.date,
+        };
+
+        let mut tx = db
+            .pool()
+            .begin()
+            .await
+            .map_err(|err| CoverageError::Db(DbError::Insert(err.to_string())))?;
+
+        db.add_test_run_in_tx(
+            &mut tx,
+            &test_run_pk.name,
+            &test_run_pk.date,
             test_run.nr_of_tests,
             test_run.data,
             test_run.logs,
@@ -119,13 +133,9 @@ pub async fn collect_from_str(db: &MantraDb, data: &str) -> Result<CoverageChang
         .await
         .map_err(CoverageError::Db)?;
 
-        let test_run_pk = TestRunPk {
-            name: test_run.name,
-            date: test_run.date,
-        };
-
         for test in test_run.tests {
-            db.add_test(
+            db.add_test_in_tx(
+                &mut tx,
                 &test_run_pk,
                 &test.name,
                 &test.filepath,
@@ -136,17 +146,19 @@ pub async fn collect_from_str(db: &MantraDb, data: &str) -> Result<CoverageChang
             .map_err(CoverageError::Db)?;
 
             for mut file in test.covered_files {
-                if let Ok(Some(mut traces)) =
-                    covered_lines_to_traces(db, file.filepath.clone(), &mut file.covered_lines)
-                        .await
-                {
+                if let Some(mut traces) = covered_lines_to_traces(
+                    &trace_spans_by_filepath,
+                    file.filepath.clone(),
+                    &mut file.covered_lines,
+                ) {
                     file.covered_traces.append(&mut traces);
                 }
 
                 for trace in file.covered_traces {
                     for req_id in trace.req_ids {
                         let db_result = db
-                            .add_coverage(
+                            .add_coverage_in_tx(
+                                &mut tx,
                                 &test_run_pk,
                                 &test.name,
                                 &file.filepath,
@@ -179,41 +191,42 @@ pub async fn collect_from_str(db: &MantraDb, data: &str) -> Result<CoverageChang
                 }
             }
         }
+
+        tx.commit()
+            .await
+            .map_err(|err| CoverageError::Db(DbError::Insert(err.to_string())))?;
     }
 
     Ok(changes)
 }
 
-async fn covered_lines_to_traces(
-    db: &MantraDb,
+fn covered_lines_to_traces(
+    trace_spans_by_filepath: &HashMap<String, Vec<(String, Line, Line, Line)>>,
     filepath: PathBuf,
     covered_lines: &mut [CoveredLine],
-) -> Result<Option<Vec<CoveredFileTrace>>, DbError> {
-    let mut traces = Vec::new();
+) -> Option<Vec<CoveredFileTrace>> {
+    if covered_lines.is_empty() {
+        return None;
+    }
 
     let file = SlashPathBuf::from(filepath);
     let file_str = file.to_string();
 
-    let trace_spans = sqlx::query!(
-        "select req_id, filepath, line, start, end from TraceSpans where filepath = $1",
-        file_str,
-    )
-    .fetch_all(db.pool())
-    .await
-    .map_err(|err| DbError::Query(err.to_string()))?
-    .into_iter()
-    .map(|record| intervaltree::Element {
-        range: (record.start as Line)..(record.end as Line),
-        value: (record.req_id, record.line as Line),
-    })
-    .collect();
+    let trace_spans = trace_spans_by_filepath
+        .get(&file_str)?
+        .iter()
+        .map(|(req_id, trace_line, start, end)| intervaltree::Element {
+            range: (*start)..(*end),
+            value: (req_id.clone(), *trace_line),
+        })
+        .collect();
 
-    traces.extend(get_covered_traces(trace_spans, covered_lines));
+    let traces: Vec<CoveredFileTrace> = get_covered_traces(trace_spans, covered_lines).collect();
 
     if traces.is_empty() {
-        Ok(None)
+        None
     } else {
-        Ok(Some(traces))
+        Some(traces)
     }
 }
 
@@ -243,10 +256,54 @@ fn get_covered_traces(
 
 #[cfg(test)]
 mod test {
+    use std::{collections::HashMap, path::PathBuf};
+
     use intervaltree::Element;
     use mantra_schema::coverage::{CoveredFileTrace, CoveredLine};
 
-    use super::get_covered_traces;
+    use super::{covered_lines_to_traces, get_covered_traces};
+
+    #[test]
+    fn covered_lines_to_traces_uses_preloaded_spans_map() {
+        let mut spans_by_filepath = HashMap::new();
+        spans_by_filepath.insert(
+            "src/example.rs".to_string(),
+            vec![
+                ("req_a".to_string(), 8, 10, 15),
+                ("req_b".to_string(), 18, 20, 25),
+            ],
+        );
+
+        let mut lines = vec![
+            CoveredLine { line: 12, hits: 1 },
+            CoveredLine { line: 22, hits: 1 },
+        ];
+
+        let traces = covered_lines_to_traces(
+            &spans_by_filepath,
+            PathBuf::from("src/example.rs"),
+            &mut lines,
+        )
+        .expect("expected covered traces from preloaded spans");
+
+        assert_eq!(traces.len(), 2);
+        let mut req_ids: Vec<_> = traces.into_iter().flat_map(|t| t.req_ids).collect();
+        req_ids.sort();
+        assert_eq!(req_ids, vec!["req_a".to_string(), "req_b".to_string()]);
+    }
+
+    #[test]
+    fn covered_lines_to_traces_returns_none_for_unknown_filepath() {
+        let spans_by_filepath = HashMap::new();
+        let mut lines = vec![CoveredLine { line: 12, hits: 1 }];
+
+        assert!(covered_lines_to_traces(
+            &spans_by_filepath,
+            PathBuf::from("src/missing.rs"),
+            &mut lines,
+        )
+        .is_none());
+    }
 
     #[test]
     fn disjoint_traces() {

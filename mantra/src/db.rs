@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use mantra_lang_tracing::path::SlashPathBuf;
 use mantra_schema::{
@@ -8,6 +9,7 @@ use mantra_schema::{
     traces::TraceEntry,
     Line,
 };
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous};
 use sqlx::Pool;
 
 pub use sqlx;
@@ -272,14 +274,15 @@ impl MantraDb {
             .url
             .clone()
             .unwrap_or("sqlite://mantra.db?mode=rwc".to_string());
+        let opts = SqliteConnectOptions::from_str(&url)
+            .map_err(|err| DbError::Connect(err.to_string()))?
+            .journal_mode(SqliteJournalMode::Memory)
+            .synchronous(SqliteSynchronous::Off)
+            .foreign_keys(true);
+
         let pool = sqlx::pool::PoolOptions::<DB>::new()
             .max_connections(1)
-            .connect(&url)
-            .await
-            .map_err(|err| DbError::Connect(err.to_string()))?;
-
-        sqlx::query("PRAGMA synchronous = NORMAL")
-            .execute(&pool)
+            .connect_with(opts)
             .await
             .map_err(|err| DbError::Connect(err.to_string()))?;
 
@@ -490,7 +493,7 @@ impl MantraDb {
     ) -> Option<String> {
         while let Some((parent, _)) = id.rsplit_once('.') {
             let parent_exists = sqlx::query!("select id from requirements where id = $1", parent)
-                .fetch_one(&mut **tx)
+                .fetch_one(tx.as_mut())
                 .await
                 .is_ok();
 
@@ -510,6 +513,30 @@ impl MantraDb {
         traces: &[TraceEntry],
         new_generation: i64,
     ) -> Result<TraceChanges, DbError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|err| DbError::Insert(format!("Failed to begin transaction: {err}")))?;
+
+        let changes = self
+            .add_traces_in_tx(&mut tx, filepath, traces, new_generation)
+            .await?;
+
+        tx.commit()
+            .await
+            .map_err(|err| DbError::Insert(format!("Failed to commit transaction: {err}")))?;
+
+        Ok(changes)
+    }
+
+    pub(crate) async fn add_traces_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, DB>,
+        filepath: &Path,
+        traces: &[TraceEntry],
+        new_generation: i64,
+    ) -> Result<TraceChanges, DbError> {
         let mut changes = TraceChanges {
             new_generation,
             ..Default::default()
@@ -518,19 +545,13 @@ impl MantraDb {
         let file = SlashPathBuf::from(filepath);
         let file_str = file.to_string();
 
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|err| DbError::Insert(format!("Failed to begin transaction: {err}")))?;
-
         for trace in traces {
             let line = trace.line;
             let line_span = trace.line_span;
 
             for id in &trace.ids {
-                if (sqlx::query!("select req_id, filepath, line from Traces where req_id = $1 and filepath = $2 and line = $3", id, file_str, line).fetch_one(&mut *tx).await).is_ok() {
-                    let _ = sqlx::query!("update Traces set generation = $4 where req_id = $1 and filepath = $2 and line = $3", id, file_str, line, new_generation).execute(&mut *tx).await;
+                if (sqlx::query!("select req_id, filepath, line from Traces where req_id = $1 and filepath = $2 and line = $3", id, file_str, line).fetch_one(tx.as_mut()).await).is_ok() {
+                    let _ = sqlx::query!("update Traces set generation = $4 where req_id = $1 and filepath = $2 and line = $3", id, file_str, line, new_generation).execute(tx.as_mut()).await;
                     changes.unchanged_cnt += 1;
 
                     if let Some(span) = line_span {
@@ -543,7 +564,7 @@ impl MantraDb {
                             line,
                             start,
                             end,
-                        ).execute(&mut *tx).await;
+                        ).execute(tx.as_mut()).await;
                     }
                 } else {
                     let res = sqlx::query!(
@@ -553,7 +574,7 @@ impl MantraDb {
                         line,
                         new_generation,
                     )
-                    .execute(&mut *tx)
+                    .execute(tx.as_mut())
                     .await;
 
                     if let Err(sqlx::Error::Database(err)) = res {
@@ -567,7 +588,7 @@ impl MantraDb {
                                     file_str,
                                     line,
                                 )
-                                .execute(&mut *tx)
+                                .execute(tx.as_mut())
                                 .await;
 
                             if let Err(err) = res {
@@ -591,7 +612,7 @@ impl MantraDb {
                                 line,
                                 start,
                                 end,
-                            ).execute(&mut *tx).await;
+                            ).execute(tx.as_mut()).await;
                         }
                     }
                 }
@@ -603,15 +624,11 @@ impl MantraDb {
                         item_name,
                         file_str,
                         span.start,
-                    ).execute(&mut *tx).await;
+                    ).execute(tx.as_mut()).await;
                 }
             }
             
         }
-
-        tx.commit()
-            .await
-            .map_err(|err| DbError::Insert(format!("Failed to commit transaction: {err}")))?;
 
         Ok(changes)
     }
@@ -674,6 +691,39 @@ impl MantraDb {
         trace_line: Line,
         req_id: &str,
     ) -> Result<bool, DbError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|err| DbError::Insert(format!("Failed to begin transaction: {err}")))?;
+
+        let inserted = self
+            .add_coverage_in_tx(
+                &mut tx,
+                test_run,
+                test_name,
+                trace_filepath,
+                trace_line,
+                req_id,
+            )
+            .await?;
+
+        tx.commit()
+            .await
+            .map_err(|err| DbError::Insert(format!("Failed to commit transaction: {err}")))?;
+
+        Ok(inserted)
+    }
+
+    pub(crate) async fn add_coverage_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, DB>,
+        test_run: &TestRunPk,
+        test_name: &str,
+        trace_filepath: &Path,
+        trace_line: Line,
+        req_id: &str,
+    ) -> Result<bool, DbError> {
         // Note: absolute or relative filepath must match with how the trace paths were added
         let file = SlashPathBuf::from(trace_filepath);
         let file_str = file.to_string();
@@ -687,7 +737,7 @@ impl MantraDb {
                 file_str,
                 trace_line,
             )
-            .execute(&self.pool)
+            .execute(tx.as_mut())
             .await;
 
         if let Err(sqlx::Error::Database(sqlx_db_error)) = &query_result {
@@ -701,7 +751,7 @@ impl MantraDb {
                     file_str,
                     trace_line,
                 )
-                .execute(&self.pool)
+                .execute(tx.as_mut())
                 .await;
 
                 match query_result {
@@ -734,6 +784,31 @@ impl MantraDb {
         line: Line,
         state: TestState,
     ) -> Result<(), DbError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|err| DbError::Insert(format!("Failed to begin transaction: {err}")))?;
+
+        self.add_test_in_tx(&mut tx, test_run, name, filepath, line, state)
+            .await?;
+
+        tx.commit()
+            .await
+            .map_err(|err| DbError::Insert(format!("Failed to commit transaction: {err}")))?;
+
+        Ok(())
+    }
+
+    pub(crate) async fn add_test_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, DB>,
+        test_run: &TestRunPk,
+        name: &str,
+        filepath: &Path,
+        line: Line,
+        state: TestState,
+    ) -> Result<(), DbError> {
         let file = SlashPathBuf::from(filepath);
         let file_str = file.to_string();
 
@@ -750,7 +825,7 @@ impl MantraDb {
                     line,
                     passed,
                 )
-                .execute(&self.pool)
+                .execute(tx.as_mut())
                 .await
                 .map_err(|err| {
                     DbError::Insert(format!(
@@ -769,7 +844,7 @@ impl MantraDb {
                         line,
                         reason,
                     )
-                    .execute(&self.pool)
+                    .execute(tx.as_mut())
                     .await
                     .map_err(|err| {
                         DbError::Insert(format!(
@@ -791,6 +866,31 @@ impl MantraDb {
         data: Option<serde_json::Value>,
         logs: Option<String>,
     ) -> Result<(), DbError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|err| DbError::Insert(format!("Failed to begin transaction: {err}")))?;
+
+        self.add_test_run_in_tx(&mut tx, name, date, nr_of_tests, data, logs)
+            .await?;
+
+        tx.commit()
+            .await
+            .map_err(|err| DbError::Insert(format!("Failed to commit transaction: {err}")))?;
+
+        Ok(())
+    }
+
+    pub(crate) async fn add_test_run_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, DB>,
+        name: &str,
+        date: &time::OffsetDateTime,
+        nr_of_tests: u32,
+        data: Option<serde_json::Value>,
+        logs: Option<String>,
+    ) -> Result<(), DbError> {
         let _ = sqlx::query!(
             "insert or ignore into TestRuns (name, date, nr_of_tests, data, logs) values ($1, $2, $3, $4, $5)",
             name,
@@ -799,7 +899,7 @@ impl MantraDb {
             data,
             logs,
         )
-        .execute(&self.pool)
+        .execute(tx.as_mut())
         .await
         .map_err(|err| {
             DbError::Insert(format!(
@@ -811,8 +911,39 @@ impl MantraDb {
         Ok(())
     }
 
+    pub(crate) async fn fetch_all_trace_spans(
+        &self,
+    ) -> Result<std::collections::HashMap<String, Vec<(String, Line, Line, Line)>>, DbError> {
+        let records = sqlx::query!("select req_id, filepath, line, start, end from TraceSpans")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|err| DbError::Query(err.to_string()))?;
+
+        let mut by_filepath = std::collections::HashMap::new();
+        for record in records {
+            by_filepath
+                .entry(record.filepath)
+                .or_insert_with(Vec::new)
+                .push((
+                    record.req_id,
+                    record.line as Line,
+                    record.start as Line,
+                    record.end as Line,
+                ));
+        }
+
+        Ok(by_filepath)
+    }
+
     pub async fn test_run_exists(&self, name: &str, date: &time::OffsetDateTime) -> bool {
-        sqlx::query!("select * from TestRuns where name = $1 and date = $2", name, date).fetch_one(&self.pool).await.is_ok()
+        sqlx::query!(
+            "select * from TestRuns where name = $1 and date = $2",
+            name,
+            date
+        )
+        .fetch_one(&self.pool)
+        .await
+        .is_ok()
     }
 
     pub async fn is_valid(&self) -> Result<(), DbError> {

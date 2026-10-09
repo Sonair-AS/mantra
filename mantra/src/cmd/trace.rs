@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::db::{MantraDb, TraceChanges};
+use crate::db::{DbError, MantraDb, TraceChanges};
 
 use ignore::{types::TypesBuilder, WalkBuilder};
 use mantra_lang_tracing::{
@@ -91,14 +91,29 @@ pub async fn trace_from_schema(
         ..Default::default()
     };
 
+    let mut tx = db
+        .pool()
+        .begin()
+        .await
+        .map_err(|err| TraceError::DbError(DbError::Insert(err.to_string())))?;
+
     for file_traces in &schema.traces {
         let mut trace_changes = db
-            .add_traces(&file_traces.filepath, &file_traces.traces, new_generation)
+            .add_traces_in_tx(
+                &mut tx,
+                &file_traces.filepath,
+                &file_traces.traces,
+                new_generation,
+            )
             .await
             .map_err(TraceError::DbError)?;
 
         changes.merge(&mut trace_changes);
     }
+
+    tx.commit()
+        .await
+        .map_err(|err| TraceError::DbError(DbError::Insert(err.to_string())))?;
 
     Ok(changes)
 }
@@ -157,6 +172,12 @@ pub async fn trace_from_source(
             )
             .build();
 
+        let mut tx = db
+            .pool()
+            .begin()
+            .await
+            .map_err(|err| TraceError::DbError(DbError::Insert(err.to_string())))?;
+
         for dir_entry_res in walk {
             let dir_entry = match dir_entry_res {
                 Ok(entry) => entry,
@@ -179,7 +200,7 @@ pub async fn trace_from_source(
                     collect_traces(dir_entry.path(), filepath.clone().into(), &lsif_graphs)?
                 {
                     let mut trace_changes = db
-                        .add_traces(&filepath, &traces, new_generation)
+                        .add_traces_in_tx(&mut tx, &filepath, &traces, new_generation)
                         .await
                         .map_err(TraceError::DbError)?;
 
@@ -187,6 +208,10 @@ pub async fn trace_from_source(
                 }
             }
         }
+
+        tx.commit()
+            .await
+            .map_err(|err| TraceError::DbError(DbError::Insert(err.to_string())))?;
 
         Ok(changes)
     } else {
