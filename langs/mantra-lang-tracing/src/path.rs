@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+#[cfg(target_os = "windows")]
 use path_slash::PathBufExt;
 
 pub fn make_relative(filepath: &Path, root: &Path) -> Option<PathBuf> {
@@ -125,9 +126,15 @@ mod test {
         let path = "folder1\\folder2/folder3\\file.rs";
         let slash_path = SlashPathBuf::from_str(path).unwrap();
 
+        // Backslashes are only path separators on Windows; elsewhere they are valid filename characters.
+        #[cfg(target_os = "windows")]
+        let expected = "folder1/folder2/folder3/file.rs";
+        #[cfg(not(target_os = "windows"))]
+        let expected = path;
+
         assert_eq!(
             &slash_path.to_string(),
-            "folder1/folder2/folder3/file.rs",
+            expected,
             "Path not converted to forward slash."
         );
     }

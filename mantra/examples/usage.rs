@@ -19,6 +19,7 @@ async fn main() {
 
     let report_cfg = mantra::cfg::Config {
         db: db.clone(),
+        warnings_as_errors: false,
         cmd: mantra::cmd::Cmd::Report(Box::new(mantra::cmd::report::ReportCliConfig {
             path: PathBuf::from("mantra/examples/mantra_report.html"),
             mantra_config: Some(mantra_file.clone()),
@@ -34,6 +35,7 @@ async fn main() {
 
     let collect_cfg = mantra::cfg::Config {
         db,
+        warnings_as_errors: false,
         cmd: mantra::cmd::Cmd::Collect(MantraConfigPath {
             filepath: mantra_file,
             verbose: true,
